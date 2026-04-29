@@ -40,6 +40,7 @@ class MockMinMaxObserver(torch.nn.Module):
             max_vals=self.max_vals,
             quantization_args=self.args,
             global_scale=getattr(self.parent(), f"{self.base_name}_global_scale", None),
+            observed=observed,
         )
 
         return scales, zero_points

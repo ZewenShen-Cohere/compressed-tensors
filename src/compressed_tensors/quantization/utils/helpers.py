@@ -52,6 +52,7 @@ def calculate_qparams(
     max_vals: Tensor,
     quantization_args: QuantizationArgs,
     global_scale: Tensor | None = None,
+    observed: Tensor | None = None,
 ) -> tuple[FloatTensor, IntTensor]:
     """
     :param min_vals: tensor of min value(s) to calculate scale(s) and zero point(s)
@@ -61,6 +62,8 @@ def calculate_qparams(
     :param quantization_args: settings to quantization
     :param global_scale: additional global scale to scale the locally generated scale
         currently only applied/supported for Fp4
+    :param observed: grouped observed values with the group dimension last. Required
+        for MX scale rounding mode "mse".
 
     :return: tuple of the calculated scale(s) and zero point(s). For FP4, the calculated
         scale is of dtype FP8
@@ -80,7 +83,10 @@ def calculate_qparams(
         max_val_pos = torch.max(torch.abs(min_vals), torch.abs(max_vals))
         if should_generate_mx_scales(args=quantization_args):
             scales = generate_mx_scales(
-                x=max_val_pos, num_bits=quantization_args.num_bits
+                x=max_val_pos,
+                num_bits=quantization_args.num_bits,
+                rounding=quantization_args.mxfp_scale_rounding,
+                observed=observed,
             )
         else:
             scales = max_val_pos / (float(bit_range) / 2)
@@ -193,7 +199,13 @@ def compute_dynamic_scales_and_zp(
         min_val = torch.amin(value, dim=reduce_dims, keepdims=keep_dims)
         max_val = torch.amax(value, dim=reduce_dims, keepdims=keep_dims)
 
-    return calculate_qparams(min_val, max_val, args, global_scale=global_scale)
+    return calculate_qparams(
+        min_val,
+        max_val,
+        args,
+        global_scale=global_scale,
+        observed=value,
+    )
 
 
 def calculate_range(

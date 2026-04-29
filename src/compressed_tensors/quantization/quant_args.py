@@ -3,7 +3,7 @@
 
 import warnings
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from compressed_tensors.utils import Aliasable
@@ -188,6 +188,8 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
         latency), WEIGHT (reorder during calibration only, normal latency with slight
         accuracy improvement), or None (no activation ordering). See ActivationOrdering
         enum for detailed explanations. Defaults to None
+    :param mxfp_scale_rounding: MXFP4/MXFP8 E8M0 scale rounding mode. Defaults to
+        "nearest", which preserves existing behavior.
     """
 
     num_bits: int = 8
@@ -212,6 +214,15 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
         description=(
             "optional dict of kwargs to be passed directly to torch quantization "
             "Observers constructor excluding quantization range or symmetry"
+        ),
+    )
+    mxfp_scale_rounding: Literal["nearest", "ceil", "mse"] = Field(
+        default="nearest",
+        description=(
+            "MXFP4/MXFP8 E8M0 scale rounding mode. 'nearest' preserves existing "
+            "behavior, 'ceil' prevents clipping of the group max, and 'mse' chooses "
+            "the lower-error neighboring exponent when observed grouped values are "
+            "available."
         ),
     )
 

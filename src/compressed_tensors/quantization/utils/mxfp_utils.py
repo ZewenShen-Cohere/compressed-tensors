@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from typing import Literal
 
 import torch
 from compressed_tensors.quantization.quant_args import (
@@ -17,11 +18,14 @@ from compressed_tensors.quantization.quant_args import (
 
 
 __all__ = [
+    "MXScaleRounding",
     "maybe_convert_from_mx_exp",
     "generate_mx_scales",
     "round_to_power_2",
     "should_generate_mx_scales",
 ]
+
+MXScaleRounding = Literal["nearest", "ceil", "mse"]
 
 # Reference: https://github.com/vllm-project/vllm/blob/main/tests/quantization/reference_mxfp4.py # noqa: E501
 
@@ -32,6 +36,11 @@ __all__ = [
 _MX_ELEM_OFFSET = {
     4: int(math.floor(math.log2(FP4_E2M1_DATA.max))),  # 2
     8: int(math.floor(math.log2(FP8_E4M3_DATA.max))),  # 8
+}
+
+_MX_ELEM_MAX = {
+    4: FP4_E2M1_DATA.max,
+    8: FP8_E4M3_DATA.max,
 }
 
 
@@ -121,11 +130,62 @@ def round_to_power_2(x: torch.Tensor) -> torch.Tensor:
     return block_max_uint.view(scale_dtype)
 
 
-def generate_mx_scales(x: torch.Tensor, num_bits: int = 4) -> torch.Tensor:
+def _candidate_mse(
+    observed: torch.Tensor,
+    scale_exp: torch.Tensor,
+    num_bits: int,
+    scale_shape: torch.Size,
+) -> torch.Tensor:
+    observed = observed.to(torch.float32)
+    scale = torch.pow(2.0, scale_exp.to(torch.float32))
+    while scale.ndim < observed.ndim - 1:
+        scale = scale.unsqueeze(0)
+    scale = scale.unsqueeze(-1)
+
+    scaled = observed / scale
+    if num_bits == 8:
+        quantized = torch.clamp(
+            scaled, min=FP8_E4M3_DATA.min, max=FP8_E4M3_DATA.max
+        )
+        quantized = quantized.to(FP8_E4M3_DATA.dtype).to(torch.float32)
+    elif num_bits == 4:
+        quantized = FP4_E2M1_DATA.cast_to_fp4(scaled)
+    else:
+        raise ValueError(f"Unsupported MX num_bits {num_bits}")
+
+    mse = torch.mean((quantized * scale - observed) ** 2, dim=-1)
+    extra_dims = mse.ndim - len(scale_shape)
+    if extra_dims > 0:
+        mse = torch.mean(mse, dim=tuple(range(extra_dims)))
+    return mse
+
+
+def _mse_mx_scale_exp(
+    x: torch.Tensor, num_bits: int, observed: torch.Tensor | None
+) -> torch.Tensor:
+    if observed is None:
+        raise ValueError("observed must be provided when rounding='mse'")
+
+    quant_max = _MX_ELEM_MAX[num_bits]
+    exact_scale_exp = torch.log2(x / quant_max)
+    lower_exp = torch.clamp(torch.floor(exact_scale_exp), min=-127, max=128)
+    upper_exp = torch.clamp(torch.ceil(exact_scale_exp), min=-127, max=128)
+
+    lower_mse = _candidate_mse(observed, lower_exp, num_bits, x.shape)
+    upper_mse = _candidate_mse(observed, upper_exp, num_bits, x.shape)
+    return torch.where(lower_mse <= upper_mse, lower_exp, upper_exp)
+
+
+def generate_mx_scales(
+    x: torch.Tensor,
+    num_bits: int = 4,
+    rounding: MXScaleRounding = "nearest",
+    observed: torch.Tensor | None = None,
+) -> torch.Tensor:
     """
     Generate MX scales (for MXFP4 and MXFP8). The scales require the
     following steps:
-    1. Round to the closest power of 2
+    1. Round to the selected power-of-2 scale exponent
     2. Subtract the element-format offset so that the largest group
        values map into the quantized type's representable range
     3. Convert to biased E8M0 exponent (bias 127)
@@ -134,9 +194,26 @@ def generate_mx_scales(x: torch.Tensor, num_bits: int = 4) -> torch.Tensor:
 
     :param x: tensor of per-group max absolute values
     :param num_bits: quantized element width (4 for MXFP4, 8 for MXFP8)
+    :param rounding: power-of-2 scale rounding mode. "nearest" preserves the
+        existing helper behavior, "ceil" avoids clipping the group max, and
+        "mse" chooses between neighboring exponents by reconstruction MSE.
+    :param observed: grouped values with the group dimension last; required for
+        rounding="mse"
     :returns scales as E8M0 exponents (uint8 after rounding)
     """
-    offset = _MX_ELEM_OFFSET[num_bits]
-    # Round to closest power of 2
-    scale_power_2 = round_to_power_2(x)
-    return 127 + torch.floor(torch.log2(scale_power_2)) - offset
+    if rounding == "nearest":
+        offset = _MX_ELEM_OFFSET[num_bits]
+        # Round to closest power of 2
+        scale_power_2 = round_to_power_2(x)
+        scale_exp = torch.floor(torch.log2(scale_power_2)) - offset
+    elif rounding == "ceil":
+        quant_max = _MX_ELEM_MAX[num_bits]
+        scale_exp = torch.clamp(
+            torch.ceil(torch.log2(x / quant_max)), min=-127, max=128
+        )
+    elif rounding == "mse":
+        scale_exp = _mse_mx_scale_exp(x, num_bits, observed)
+    else:
+        raise ValueError(f"Unsupported MX scale rounding mode {rounding}")
+
+    return 127 + scale_exp
