@@ -218,6 +218,7 @@ class QuantizationArgs(BaseModel, use_enum_values=True):
     )
     mxfp_scale_rounding: Literal["nearest", "ceil", "mse"] = Field(
         default="nearest",
+        exclude=True,
         description=(
             "MXFP4/MXFP8 E8M0 scale rounding mode. 'nearest' preserves existing "
             "behavior, 'ceil' prevents clipping of the group max, and 'mse' chooses "

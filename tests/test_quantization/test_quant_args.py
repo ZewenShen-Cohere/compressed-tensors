@@ -156,3 +156,16 @@ def test_serialize_args():
     # Deserialize from dict
     reloaded = QuantizationArgs.model_validate(args_dict)
     assert reloaded == args
+
+
+def test_mxfp_scale_rounding_is_not_serialized():
+    """MXFP scale rounding is calibration-only and should not enter checkpoints."""
+    args = QuantizationArgs(
+        num_bits=8,
+        type=QuantizationType.FLOAT,
+        group_size=32,
+        mxfp_scale_rounding="ceil",
+    )
+
+    assert args.mxfp_scale_rounding == "ceil"
+    assert "mxfp_scale_rounding" not in args.model_dump()
